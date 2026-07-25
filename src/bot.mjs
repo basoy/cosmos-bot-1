@@ -561,15 +561,20 @@ async function maybeStartEngines(settings, pm, cosmos) {
   const halted = fleetHalted();
   if (halted) warn(`FLEET HALT active — ${fleetReason() || "(no reason)"} — no entries until a signed resume`);
   const stopped = settings.bot_enabled === false || halted || qtState.ddHalt === true;
+  // Name the ACTUAL stop cause (2026-07-25): all three stop paths used to print "you pressed Stop
+  // in the dashboard", so a drawdown-halted bot told its owner they had paused it themselves.
+  const stopWhy = settings.bot_enabled === false ? "you pressed Stop in the dashboard"
+    : halted ? "signed FLEET HALT"
+    : "drawdown breaker: portfolio >30% below its 12h high (entries resume on recovery)";
   const wantQt = engineOn("QTABLE2_ENABLED", settings.qtable2) && !stopped;
   const wantCopy = (process.env.COPYTRADE_ENABLED === "1" || settings.copytrade === true) && !stopped;
   const wantCert = engineOn("CERT15_ENABLED", settings.cert15) && !stopped;
   // Announce every transition. A silently-disabled engine is the failure this whole block exists to
   // prevent: without these lines the only symptom is "the bot stopped trading" with no explanation.
   for (const [name, want, reason] of [
-    ["qtable2", wantQt, stopped ? "you pressed Stop in the dashboard" : engineReason("QTABLE2_ENABLED", settings.qtable2)],
-    ["cert15", wantCert, stopped ? "you pressed Stop in the dashboard" : engineReason("CERT15_ENABLED", settings.cert15)],
-    ["copytrade", wantCopy, stopped ? "you pressed Stop in the dashboard" : settings.copytrade === true ? "" : "server flag off"],
+    ["qtable2", wantQt, stopped ? stopWhy : engineReason("QTABLE2_ENABLED", settings.qtable2)],
+    ["cert15", wantCert, stopped ? stopWhy : engineReason("CERT15_ENABLED", settings.cert15)],
+    ["copytrade", wantCopy, stopped ? stopWhy : settings.copytrade === true ? "" : "server flag off"],
   ]) {
     if (qtState[name] !== undefined && qtState[name] !== want) {
       log(want ? `engine ${name}: ENABLED` : `engine ${name}: DISABLED - ${reason || "server flag off"} (it will stop trading)`);
@@ -764,6 +769,10 @@ async function cycle(cosmos, pm) {
       sample_size_usd: Number((sampleSizeUsd || 0).toFixed(2)),
       open_count: Object.keys(positions).length,
       feed_count: feed.count,
+      // WHY-NOT-TRADING telemetry (2026-07-25): the drawdown latch and the engines actually running.
+      // Without these a halted bot looks green in admin (polling + reporting) while buying nothing.
+      dd_halt: qtState.ddHalt === true,
+      engines_on: { qtable2: qtState.qtable2 === true, copytrade: qtState.copytrade === true, cert15: qtState.cert15 === true },
     });
   }
 

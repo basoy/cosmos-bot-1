@@ -298,7 +298,10 @@ export function startCopyTrade(deps) {
     // raised our target above what we hold, ADD the difference NOW. Waiting for the 20s polled loop
     // meant the 2nd..5th beats of a 5-minute candle never fired — the beat ladder collapsed to
     // whatever the first clip bought.
-    const posCeil = ((state.portfolio || 0) * MAX_POSITION_PCT) / 100;   // hard ceiling for THIS market
+    // FLOORED at the $1 Polymarket minimum (2026-07-25): a bare 5% ceiling made every portfolio
+    // under $20 skip EVERY signal ("per-position cap below $1 min") — fleet copy-trading stopped for
+    // all but one account the hour the 5% cap shipped. $1 on a $10 account is still a sane cap.
+    const posCeil = Math.max(MIN_ORDER_USD, ((state.portfolio || 0) * MAX_POSITION_PCT) / 100);   // hard ceiling for THIS market
     const mine = primary && sameSide(primary) ? primary : (positions[compKey]?.source === "copytrade" ? positions[compKey] : null);
     if (mine) {
       const held = Number(mine.size_usd) || 0;
@@ -363,7 +366,8 @@ export function startCopyTrade(deps) {
       if (primary?.source === "copytrade" && sameSide(primary)) mine = primary;
       else if (positions[compKey]?.source === "copytrade") mine = positions[compKey];
 
-      const posCeil = ((state.portfolio || 0) * MAX_POSITION_PCT) / 100;   // per-position ceiling (owner incident 2026-07-22)
+      // Same $1 floor as the fast path: 5% of a sub-$20 portfolio is below the exchange minimum.
+      const posCeil = Math.max(MIN_ORDER_USD, ((state.portfolio || 0) * MAX_POSITION_PCT) / 100);   // per-position ceiling (owner incident 2026-07-22)
       if (mine) {
         const add = Math.min(target, posCeil) - (Number(mine.size_usd) || 0);
         if (add < MIN_ADD_USD) continue;                                // at the ceiling or no transition worth an order

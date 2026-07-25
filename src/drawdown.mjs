@@ -17,8 +17,12 @@ const MIN_PORT = Number(process.env.COSMOS_DD_MIN_USD) || 50;                   
 const DIR = process.env.COSMOS_DATA_DIR ? process.env.COSMOS_DATA_DIR.replace(/\/$/, "") : join(homedir(), ".cosmos");
 try { mkdirSync(DIR, { recursive: true }); } catch { /* best-effort */ }
 const FILE = join(DIR, "drawdown.json");
-let samples = []; try { samples = (JSON.parse(readFileSync(FILE, "utf8")).s || []).filter((x) => x && Number.isFinite(x.t)); } catch { /* fresh */ }
-let tripped = false;
+// The LATCH is persisted alongside the samples (2026-07-25): `tripped` used to reset to false on
+// every ~10-min auto-update restart, so a bot that had drifted back to -29% mid-crash silently
+// resumed buying — the latch-until-85%-recovery rule only held between restarts.
+let samples = []; let tripped = false;
+try { const j = JSON.parse(readFileSync(FILE, "utf8")); samples = (j.s || []).filter((x) => x && Number.isFinite(x.t)); tripped = j.tripped === true; } catch { /* fresh */ }
+const save = () => { try { writeFileSync(FILE, JSON.stringify({ s: samples.slice(-800), tripped })); } catch { /* best-effort */ } };
 
 // Call once per cycle with the freshly-read portfolio value. Returns { halt, high, dd } and latches
 // the trip so a brief bounce mid-crash doesn't flap entries back on until a real recovery (85%).
@@ -26,11 +30,11 @@ export function drawdownCheck(portfolio) {
   const now = Date.now();
   if (Number.isFinite(portfolio) && portfolio > 0) { samples.push({ t: now, v: portfolio }); }
   samples = samples.filter((x) => x.t >= now - WINDOW_MS);
-  try { writeFileSync(FILE, JSON.stringify({ s: samples.slice(-800) })); } catch { /* best-effort */ }
   const high = samples.reduce((m, x) => Math.max(m, x.v), 0);
-  if (!(high >= MIN_PORT) || !Number.isFinite(portfolio) || portfolio <= 0) return { halt: tripped, high, dd: 0 };
+  if (!(high >= MIN_PORT) || !Number.isFinite(portfolio) || portfolio <= 0) { save(); return { halt: tripped, high, dd: 0 }; }
   const dd = 1 - portfolio / high;                       // fraction below the 12h high-water mark
   if (!tripped && dd > DD_TRIP) tripped = true;          // trip
   else if (tripped && portfolio >= high * DD_CLEAR) tripped = false; // clear only on real recovery
+  save();                                                // samples AND the latch survive restarts
   return { halt: tripped, high, dd };
 }
