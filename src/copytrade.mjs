@@ -196,7 +196,9 @@ export function startCopyTrade(deps) {
       // Failed FAK must NOT burn the full 60s cooldown (deep-check #6): on a 5-min candle that lockout
       // IS the missed entry. Leave a 5s breather, then either path may retry while the market lives.
       recentBuy.set(sig.condition_id, Date.now() - COOLDOWN_MS + 5_000);
-      warn(`copytrade ${kind} failed: ${String(r.error ?? r.err ?? r.status ?? "").slice(0, 120)}`); return false;
+      // Log the REASON, not just the status: "open failed: 400" hid that the local risk governor
+      // (not Polymarket) was refusing every buy for two days (2026-07-26 incident).
+      warn(`copytrade ${kind} failed: ${String(r.body?.polymarket?.error ?? r.error ?? r.err ?? r.status ?? "").slice(0, 120)}`); return false;
     }
     stats.fills++;
     cosmos.meter({ ...r.meta, source: "copytrade" }).catch(() => {}); // fire-and-forget: the trading loop must NEVER block on the metering relay (a hung await here froze tick() for 12.5h on 07-21)

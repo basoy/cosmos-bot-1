@@ -105,8 +105,12 @@ function riskClampBuy(sizeShares, price) {
   const effPct = fleetPct != null ? Math.min(MAX_TRADE_PCT, fleetPct) : MAX_TRADE_PCT;
   const perFillUsd = port > 0 ? Math.max(MIN_FLOOR_USD, (port * effPct) / 100) : MIN_FLOOR_USD;
   // rolling governors (buy-volume, never reduced by sells) + count backstop
-  const hourCap = port > 0 ? (port * MAX_HOUR_PCT) / 100 : MIN_FLOOR_USD;
-  const dayCap  = port > 0 ? (port * MAX_DAY_PCT) / 100 : MIN_FLOOR_USD;
+  // FLOORED at MIN_FLOOR_USD (2026-07-26): 40%/h of a sub-$5 portfolio computes under the $2 floor,
+  // so roomUsd < floor refused EVERY buy at ZERO spend ("rolling buy-volume cap (h 0/2)") — the same
+  // bug class as the copy posCeil $1 floor, one layer deeper. With the floor, a tiny account places
+  // ~one $2 clip per hour window instead of being silently dead.
+  const hourCap = port > 0 ? Math.max(MIN_FLOOR_USD, (port * MAX_HOUR_PCT) / 100) : MIN_FLOOR_USD;
+  const dayCap  = port > 0 ? Math.max(MIN_FLOOR_USD, (port * MAX_DAY_PCT) / 100) : MIN_FLOOR_USD;
   const hourSpent = spendWindow(3600e3), daySpent = spendWindow(86400e3);
   const hourBuys = spendLog.filter((b) => b.t >= Date.now() - 3600e3).length;
   if (hourBuys >= MAX_HOUR_BUYS) return { shares: 0, capped: true, reason: `hourly buy-count cap (${hourBuys}/${MAX_HOUR_BUYS})` };
