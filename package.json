@@ -16,7 +16,7 @@
     "node": ">=18"
   },
   "dependencies": {
-    "@polymarket/clob-client-v2": "^1.0.6",
+    "@polymarket/clob-client-v2": "1.1.0",
     "viem": "^2.46.3",
     "ws": "^8.18.0"
   }
