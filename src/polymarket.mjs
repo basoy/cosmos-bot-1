@@ -190,16 +190,35 @@ export async function makePolymarket(config) {
   // the API key's address, so the EOA-bound `creds` above are rejected with "maker address not
   // allowed, please use the deposit wallet flow". Ported from the validated qtable-live tester —
   // without this, every new-style Polymarket account fails 100% of its orders.
-  const DEPOSIT_ERR = /deposit wallet|maker address not allowed|signer address has to be the address of the API/i;
+  const DEPOSIT_ERR = /deposit wallet|maker address not allowed|signer address has to be the address of the API|signer.*address.*API|address.*API KEY/i;
   let depositCreds = null;
+  // Pre-derived deposit-wallet API credentials: skip the derive step (which requires an L1 auth
+  // round-trip) and use these directly. Set via POLYMARKET_API_KEY / POLYMARKET_API_SECRET /
+  // POLYMARKET_API_PASSPHRASE env vars.
+  const envApiKey = (process.env.POLYMARKET_API_KEY || "").trim();
+  const envApiSecret = (process.env.POLYMARKET_API_SECRET || "").trim();
+  const envApiPass = (process.env.POLYMARKET_API_PASSPHRASE || "").trim();
+  if (envApiKey && envApiSecret && envApiPass) {
+    depositCreds = { key: envApiKey, secret: envApiSecret, passphrase: envApiPass };
+    console.log("[polymarket] using pre-derived API credentials from env vars");
+  }
   const deriveForFunder = async () => {
     if (depositCreds) return depositCreds;
     try {
       const mkH = async () => createL1Headers(walletClient, 137, 0, undefined, funder);
-      let jj = await fetch(`${CLOB_HOST}/auth/api-key`, { method: "POST", headers: await mkH(), signal: AbortSignal.timeout(10_000) }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
-      if (!jj?.apiKey) jj = await fetch(`${CLOB_HOST}/auth/derive-api-key`, { headers: await mkH(), signal: AbortSignal.timeout(10_000) }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+      const headers = await mkH();
+      console.log(`[polymarket] deriveForFunder: attempting /auth/api-key with POLY_ADDRESS=${headers.POLY_ADDRESS}`);
+      let jj = await fetch(`${CLOB_HOST}/auth/api-key`, { method: "POST", headers, signal: AbortSignal.timeout(10_000) })
+        .then(async (r) => { const t = await r.text(); if (!r.ok) console.log(`[polymarket] /auth/api-key ${r.status}: ${t.slice(0, 200)}`); return r.ok ? JSON.parse(t) : null; })
+        .catch((e) => { console.log(`[polymarket] /auth/api-key fetch error: ${e?.message}`); return null; });
+      if (!jj?.apiKey) {
+        console.log("[polymarket] deriveForFunder: /auth/api-key returned no apiKey, trying /auth/derive-api-key");
+        jj = await fetch(`${CLOB_HOST}/auth/derive-api-key`, { headers, signal: AbortSignal.timeout(10_000) })
+          .then(async (r) => { const t = await r.text(); if (!r.ok) console.log(`[polymarket] /auth/derive-api-key ${r.status}: ${t.slice(0, 200)}`); return r.ok ? JSON.parse(t) : null; })
+          .catch((e) => { console.log(`[polymarket] /auth/derive-api-key fetch error: ${e?.message}`); return null; });
+      }
       depositCreds = jj?.apiKey ? { key: jj.apiKey, secret: jj.secret, passphrase: jj.passphrase } : null;
-    } catch { depositCreds = null; }
+    } catch (e) { console.log(`[polymarket] deriveForFunder exception: ${e?.message}`); depositCreds = null; }
     console.log(depositCreds ? "[polymarket] ✓ API key bound to the deposit wallet (POLY_1271 ready)" : "[polymarket] ⚠ could not derive a deposit-wallet API key");
     return depositCreds;
   };
@@ -253,6 +272,15 @@ export async function makePolymarket(config) {
       }
     }
   } catch { /* detection must never block startup - default stays POLY_PROXY */ }
+  // POLYMARKET_SIG_TYPE override: force the signature type regardless of bytecode detection.
+  // Values: 0=EOA, 1=POLY_PROXY, 2=POLY_GNOSIS_SAFE, 3=POLY_1271.
+  // Needed when Polymarket's server-side migration changes the account's effective type but the
+  // on-chain bytecode still reflects the old kind (e.g. magic-proxy-1167 that now requires POLY_1271).
+  const envSig = Number(process.env.POLYMARKET_SIG_TYPE);
+  if (Number.isFinite(envSig) && envSig >= 0 && envSig <= 3 && envSig !== sigType) {
+    console.log(`[polymarket] POLYMARKET_SIG_TYPE=${envSig} overrides detected ${SIG_NAMES[sigType]}`);
+    sigType = envSig;
+  }
   console.log(`[polymarket] account type: ${SIG_NAMES[sigType]} (wallet: ${walletKind})`);
 
   // FUNDER SANITY CHECK (non-blocking, loud): the #1 silent-failure onboarding mistake is pasting the
@@ -544,7 +572,9 @@ export async function makePolymarket(config) {
           // A THROW is transport-level (timeout, connection reset, DNS, signing) — the request may
           // have reached the CLOB and the order may be LIVE even though we never saw the answer.
           // Deliberately NOT rejected:true: re-posting here (affiliate fallback) could double-fill.
-          return { ok: false, status: 400, body: { polymarket: { error: e?.message ?? "order failed" } }, meta };
+          const errMsg = e?.message ?? "order failed";
+          console.log(`[polymarket] order error: ${errMsg.slice(0, 300)}`);
+          return { ok: false, status: 400, body: { polymarket: { error: errMsg } }, meta };
         }
       };
       let r = await attempt(wantAff);
@@ -553,7 +583,9 @@ export async function makePolymarket(config) {
       // Detection can miss it (an empty/undeployed deposit wallet probes $0), so recover at order time:
       // derive the funder-bound key, switch the client to POLY_1271, and retry ONCE. Sticky — every
       // later order uses the working client. This is what makes the bot work for EVERY account kind.
-      if (!r.ok && sigType !== SignatureTypeV2.POLY_1271 && DEPOSIT_ERR.test(JSON.stringify(r.body ?? ""))) {
+      const errBody = JSON.stringify(r.body ?? "");
+      const isDepositErr = DEPOSIT_ERR.test(errBody) || /signer.*address|address.*API KEY|maker address/i.test(errBody);
+      if (!r.ok && sigType !== SignatureTypeV2.POLY_1271 && isDepositErr) {
         console.log("[polymarket] ↻ deposit-wallet account detected at order time — switching to POLY_1271 with a funder-bound API key…");
         const dc = await deriveForFunder();
         sigType = SignatureTypeV2.POLY_1271;
@@ -561,6 +593,7 @@ export async function makePolymarket(config) {
         affClient = null;                       // rebuilt with the new sigType on the next rotation hit
         r = await attempt(wantAff);
         if (r.ok) console.log("[polymarket] ✓ POLY_1271 (deposit wallet) works — using it from now on");
+        else console.log(`[polymarket] ✗ POLY_1271 retry also failed: ${JSON.stringify(r.body ?? "").slice(0, 200)}`);
       }
       // AFFILIATE FALLBACK (audit #4): if the AFFILIATE-coded order was REJECTED (an invalid/
       // unregistered code), retry ONCE with the Cosmos client so the referred user's order still
